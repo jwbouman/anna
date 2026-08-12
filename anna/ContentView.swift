@@ -211,8 +211,7 @@ struct YahooChartResponse: Decodable {
 struct ContentView: View {
     @State private var viewModel = StockPriceViewModel()
     @State private var symbolInput = "ADYEN.AS"
-
-    private let presetSymbols = ["ADYEN.AS", "ASML.AS", "BESI.AS", "AAPL", "TSLA"]
+    @AppStorage("favoriteStockSymbols") private var storedFavoriteSymbols = "ADYEN.AS,ASML.AS,BESI.AS,AAPL,TSLA"
 
     var body: some View {
         NavigationStack {
@@ -260,6 +259,17 @@ struct ContentView: View {
         symbolInput.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private var normalizedSymbolInput: String {
+        trimmedSymbolInput.uppercased()
+    }
+
+    private var favoriteSymbols: [String] {
+        storedFavoriteSymbols
+            .split(separator: ",")
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).uppercased() }
+            .filter { !$0.isEmpty }
+    }
+
     private var symbolSelector: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
@@ -279,14 +289,40 @@ struct ContentView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(viewModel.isLoading || trimmedSymbolInput.isEmpty)
+
+                Button {
+                    addCurrentSymbolToFavorites()
+                } label: {
+                    Label("Bewaar", systemImage: "plus")
+                }
+                .buttonStyle(.bordered)
+                .disabled(trimmedSymbolInput.isEmpty || favoriteSymbols.contains(normalizedSymbolInput))
             }
 
-            Picker("Snelkeuze", selection: $symbolInput) {
-                ForEach(presetSymbols, id: \.self) { symbol in
-                    Text(symbol).tag(symbol)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(favoriteSymbols, id: \.self) { symbol in
+                        HStack(spacing: 4) {
+                            Button(symbol) {
+                                symbolInput = symbol
+                                loadSelectedSymbol()
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(symbol == viewModel.symbol ? .blue : .secondary)
+
+                            Button {
+                                removeFavoriteSymbol(symbol)
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.caption.weight(.semibold))
+                            }
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(.secondary)
+                            .disabled(favoriteSymbols.count == 1)
+                        }
+                    }
                 }
             }
-            .pickerStyle(.segmented)
         }
     }
 
@@ -303,22 +339,56 @@ struct ContentView: View {
             Spacer()
 
             if let priceChange = viewModel.priceChange {
-                Text(priceChange, format: .currency(code: "EUR"))
-                    .font(.headline)
-                    .foregroundStyle(priceChange >= 0 ? .green : .red)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background((priceChange >= 0 ? Color.green : Color.red).opacity(0.12), in: Capsule())
+                VStack(alignment: .trailing, spacing: 3) {
+                    Text("koersverschil")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    Text(priceChange, format: .currency(code: "EUR"))
+                        .font(.headline)
+                        .foregroundStyle(priceChange >= 0 ? .green : .red)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background((priceChange >= 0 ? Color.green : Color.red).opacity(0.12), in: Capsule())
             }
         }
     }
 
     private func loadSelectedSymbol() {
-        symbolInput = trimmedSymbolInput.uppercased()
+        symbolInput = normalizedSymbolInput
 
         Task {
             await viewModel.loadPrices(symbol: symbolInput)
         }
+    }
+
+    private func addCurrentSymbolToFavorites() {
+        let symbol = normalizedSymbolInput
+
+        guard !symbol.isEmpty, !favoriteSymbols.contains(symbol) else {
+            return
+        }
+
+        saveFavoriteSymbols(favoriteSymbols + [symbol])
+    }
+
+    private func removeFavoriteSymbol(_ symbol: String) {
+        let updatedSymbols = favoriteSymbols.filter { $0 != symbol }
+
+        guard !updatedSymbols.isEmpty else {
+            return
+        }
+
+        saveFavoriteSymbols(updatedSymbols)
+
+        if symbol == symbolInput {
+            symbolInput = updatedSymbols[0]
+        }
+    }
+
+    private func saveFavoriteSymbols(_ symbols: [String]) {
+        storedFavoriteSymbols = symbols.joined(separator: ",")
     }
 
     private var charts: some View {
