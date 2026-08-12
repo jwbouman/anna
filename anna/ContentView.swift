@@ -1,6 +1,6 @@
 //
 //  ContentView.swift
-//  anna
+//  anna : stock analyzer
 //
 //  Created by Jan Bouman on 11/08/2026.
 //
@@ -16,6 +16,8 @@ struct StockPrice: Identifiable {
     let close: Double
     let volume: Int
     let rsi: Double?
+    let stochasticK: Double?
+    let stochasticD: Double?
 }
 
 @MainActor
@@ -96,31 +98,76 @@ struct YahooFinanceService {
             throw StockPriceError.noData
         }
 
-        let entries = zip(timestamps, zip(quote.close, quote.volume)).compactMap { timestamp, values -> (date: Date, close: Double, volume: Int)? in
-            let (close, volume) = values
+        let entries = zip(timestamps, zip(zip(quote.close, quote.high), zip(quote.low, quote.volume))).compactMap { timestamp, values -> (date: Date, close: Double, high: Double, low: Double, volume: Int)? in
+            let ((close, high), (low, volume)) = values
 
-            guard let close, let volume else {
+            guard let close, let high, let low, let volume else {
                 return nil
             }
 
             return (
                 date: Date(timeIntervalSince1970: TimeInterval(timestamp)),
                 close: close,
+                high: high,
+                low: low,
                 volume: volume
             )
         }
 
         let rsiValues = calculateRSI(for: entries.map(\.close), period: 14)
+        let stochasticValues = calculateStochasticOscillator(entries: entries, period: 14, signalPeriod: 3)
         let prices = entries.enumerated().map { index, entry in
             StockPrice(
                 date: entry.date,
                 close: entry.close,
                 volume: entry.volume,
-                rsi: rsiValues[index]
+                rsi: rsiValues[index],
+                stochasticK: stochasticValues[index].k,
+                stochasticD: stochasticValues[index].d
             )
         }
 
         return Array(prices.suffix(count))
+    }
+
+    private func calculateStochasticOscillator(
+        entries: [(date: Date, close: Double, high: Double, low: Double, volume: Int)],
+        period: Int,
+        signalPeriod: Int
+    ) -> [(k: Double?, d: Double?)] {
+        guard entries.count >= period else {
+            return Array(repeating: (nil, nil), count: entries.count)
+        }
+
+        var kValues = Array<Double?>(repeating: nil, count: entries.count)
+        var dValues = Array<Double?>(repeating: nil, count: entries.count)
+
+        for index in (period - 1)..<entries.count {
+            let window = entries[(index - period + 1)...index]
+            guard let lowestLow = window.map(\.low).min(),
+                  let highestHigh = window.map(\.high).max() else {
+                continue
+            }
+
+            if highestHigh == lowestLow {
+                kValues[index] = 50
+            } else {
+                kValues[index] = ((entries[index].close - lowestLow) / (highestHigh - lowestLow)) * 100
+            }
+        }
+
+        for index in (period - 1)..<entries.count {
+            let signalStartIndex = max(0, index - signalPeriod + 1)
+            let signalValues = kValues[signalStartIndex...index].compactMap { $0 }
+
+            guard signalValues.count == signalPeriod else {
+                continue
+            }
+
+            dValues[index] = signalValues.reduce(0, +) / Double(signalPeriod)
+        }
+
+        return zip(kValues, dValues).map { (k: $0, d: $1) }
     }
 
     private func calculateRSI(for closes: [Double], period: Int) -> [Double?] {
@@ -204,6 +251,8 @@ struct YahooChartResponse: Decodable {
 
     struct Quote: Decodable {
         let close: [Double?]
+        let high: [Double?]
+        let low: [Double?]
         let volume: [Int?]
     }
 }
@@ -411,6 +460,24 @@ struct ContentView: View {
 
                 rsiChart
             }
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("Stochastic 14,3")
+                        .font(.headline)
+
+                    Spacer()
+
+                    if let latestK = viewModel.latestPrice?.stochasticK,
+                       let latestD = viewModel.latestPrice?.stochasticD {
+                        Text("%K \(latestK.formatted(.number.precision(.fractionLength(1))))  %D \(latestD.formatted(.number.precision(.fractionLength(1))))")
+                            .font(.subheadline.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                stochasticChart
+            }
         }
     }
 
@@ -525,6 +592,52 @@ struct ContentView: View {
         .chartYScale(domain: 0...100)
         .chartYAxis {
             AxisMarks(position: .leading, values: [30, 50, 70])
+        }
+        .chartXAxis {
+            AxisMarks(values: .stride(by: .weekOfYear)) { _ in
+                AxisTick()
+                AxisValueLabel(format: .dateTime.day().month(.abbreviated))
+            }
+        }
+        .frame(height: 150)
+    }
+
+    private var stochasticChart: some View {
+        Chart {
+            RuleMark(y: .value("Overbought", 80))
+                .foregroundStyle(.red.opacity(0.45))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+
+            RuleMark(y: .value("Oversold", 20))
+                .foregroundStyle(.green.opacity(0.45))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+
+            ForEach(viewModel.prices) { price in
+                if let stochasticK = price.stochasticK {
+                    LineMark(
+                        x: .value("Datum", price.date),
+                        y: .value("%K", stochasticK),
+                        series: .value("Lijn", "%K")
+                    )
+                    .interpolationMethod(.catmullRom)
+                    .foregroundStyle(.orange)
+                }
+
+                if let stochasticD = price.stochasticD {
+                    LineMark(
+                        x: .value("Datum", price.date),
+                        y: .value("%D", stochasticD),
+                        series: .value("Lijn", "%D")
+                    )
+                    .interpolationMethod(.catmullRom)
+                    .foregroundStyle(.pink)
+                    .lineStyle(StrokeStyle(lineWidth: 2, dash: [5, 3]))
+                }
+            }
+        }
+        .chartYScale(domain: 0...100)
+        .chartYAxis {
+            AxisMarks(position: .leading, values: [20, 50, 80])
         }
         .chartXAxis {
             AxisMarks(values: .stride(by: .weekOfYear)) { _ in
