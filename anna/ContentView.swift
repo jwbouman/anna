@@ -25,6 +25,7 @@ struct StockPrice: Identifiable {
 final class StockPriceViewModel {
     private(set) var prices: [StockPrice] = []
     private(set) var symbol = "ADYEN.AS"
+    private(set) var historicalDayCount = 30
     private(set) var isLoading = false
     var errorMessage: String?
 
@@ -42,10 +43,11 @@ final class StockPriceViewModel {
         return last - first
     }
 
-    func loadPrices(symbol requestedSymbol: String? = nil) async {
+    func loadPrices(symbol requestedSymbol: String? = nil, dayCount requestedDayCount: Int? = nil) async {
         let normalizedSymbol = (requestedSymbol ?? symbol)
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .uppercased()
+        let normalizedDayCount = min(max(requestedDayCount ?? historicalDayCount, 15), 90)
 
         guard !normalizedSymbol.isEmpty else {
             prices = []
@@ -57,8 +59,9 @@ final class StockPriceViewModel {
         errorMessage = nil
 
         do {
-            prices = try await service.fetchLastClosingPrices(symbol: normalizedSymbol, count: 30)
+            prices = try await service.fetchLastClosingPrices(symbol: normalizedSymbol, count: normalizedDayCount)
             symbol = normalizedSymbol
+            historicalDayCount = normalizedDayCount
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -75,7 +78,7 @@ struct YahooFinanceService {
 
         var components = URLComponents(string: "https://query1.finance.yahoo.com/v8/finance/chart/\(encodedSymbol)")
         components?.queryItems = [
-            URLQueryItem(name: "range", value: "3mo"),
+            URLQueryItem(name: "range", value: rangeParameter(for: count)),
             URLQueryItem(name: "interval", value: "1d")
         ]
 
@@ -128,6 +131,10 @@ struct YahooFinanceService {
         }
 
         return Array(prices.suffix(count))
+    }
+
+    private func rangeParameter(for count: Int) -> String {
+        count <= 45 ? "3mo" : "6mo"
     }
 
     private func calculateStochasticOscillator(
@@ -260,6 +267,7 @@ struct YahooChartResponse: Decodable {
 struct ContentView: View {
     @State private var viewModel = StockPriceViewModel()
     @State private var symbolInput = "ADYEN.AS"
+    @State private var historicalDayCount = 30
     @AppStorage("favoriteStockSymbols") private var storedFavoriteSymbols = "ADYEN.AS,ASML.AS,BESI.AS,AAPL,TSLA"
 
     var body: some View {
@@ -298,8 +306,11 @@ struct ContentView: View {
             }
             .task {
                 if viewModel.prices.isEmpty {
-                    await viewModel.loadPrices(symbol: symbolInput)
+                    await viewModel.loadPrices(symbol: symbolInput, dayCount: historicalDayCount)
                 }
+            }
+            .onChange(of: historicalDayCount) { _, _ in
+                loadSelectedSymbol()
             }
         }
     }
@@ -347,6 +358,13 @@ struct ContentView: View {
                 .buttonStyle(.bordered)
                 .disabled(trimmedSymbolInput.isEmpty || favoriteSymbols.contains(normalizedSymbolInput))
             }
+
+            Stepper(value: $historicalDayCount, in: 15...90, step: 5) {
+                Text("historische dagen: \(historicalDayCount)")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            .disabled(viewModel.isLoading)
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
@@ -408,7 +426,7 @@ struct ContentView: View {
         symbolInput = normalizedSymbolInput
 
         Task {
-            await viewModel.loadPrices(symbol: symbolInput)
+            await viewModel.loadPrices(symbol: symbolInput, dayCount: historicalDayCount)
         }
     }
 
@@ -525,6 +543,7 @@ struct ContentView: View {
                 }
             }
             .chartYAxisLabel("Prijs")
+            .chartXScale(domain: visibleDateRange)
             .chartXAxis {
                 AxisMarks(values: .stride(by: .weekOfYear)) { _ in
                     AxisGridLine()
@@ -534,6 +553,24 @@ struct ContentView: View {
             }
             .frame(height: 300)
         }
+    }
+
+    private var dateRange: ClosedRange<Date>? {
+        guard let startDate = viewModel.prices.first?.date,
+              let endDate = viewModel.prices.last?.date else {
+            return nil
+        }
+
+        return startDate...endDate
+    }
+
+    private var visibleDateRange: ClosedRange<Date> {
+        if let dateRange {
+            return dateRange
+        }
+
+        let now = Date()
+        return now...now.addingTimeInterval(86_400)
     }
 
     private var priceRange: ClosedRange<Double>? {
@@ -590,6 +627,7 @@ struct ContentView: View {
             }
         }
         .chartYScale(domain: 0...100)
+        .chartXScale(domain: visibleDateRange)
         .chartYAxis {
             AxisMarks(position: .leading, values: [30, 50, 70])
         }
@@ -636,6 +674,7 @@ struct ContentView: View {
             }
         }
         .chartYScale(domain: 0...100)
+        .chartXScale(domain: visibleDateRange)
         .chartYAxis {
             AxisMarks(position: .leading, values: [20, 50, 80])
         }
