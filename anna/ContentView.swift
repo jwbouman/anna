@@ -295,7 +295,7 @@ struct ContentView: View {
                 }
                 .padding()
             }
-            .navigationTitle("Aandelenkoers")
+            .navigationTitle("Tech. analyse")
             .toolbar {
                 Button {
                     loadSelectedSymbol()
@@ -353,17 +353,17 @@ struct ContentView: View {
                 Button {
                     addCurrentSymbolToFavorites()
                 } label: {
-                    Label("Bewaar", systemImage: "plus")
+                    Label("Save", systemImage: "plus")
                 }
                 .buttonStyle(.bordered)
                 .disabled(trimmedSymbolInput.isEmpty || favoriteSymbols.contains(normalizedSymbolInput))
             }
 
-            Stepper(value: $historicalDayCount, in: 15...90, step: 5) {
-                Text("historische dagen: \(historicalDayCount)")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+            Picker("Historische dagen", selection: $historicalDayCount) {
+                Text("30 dagen").tag(30)
+                Text("60 dagen").tag(60)
             }
+            .pickerStyle(.segmented)
             .disabled(viewModel.isLoading)
 
             ScrollView(.horizontal, showsIndicators: false) {
