@@ -4,7 +4,11 @@ struct KoersKompasLaunchView: View {
     var body: some View {
         ZStack {
             LinearGradient(
-                colors: [Color(.systemBackground), Color.blue.opacity(0.12), Color.teal.opacity(0.16)],
+                colors: [
+                    Color(red: 0.96, green: 0.98, blue: 1.0),
+                    Color(red: 0.89, green: 0.95, blue: 1.0),
+                    Color(red: 0.88, green: 0.97, blue: 0.96)
+                ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )

@@ -21,6 +21,9 @@ struct RootView: View {
 
     var body: some View {
         ZStack {
+            Color(.systemBackground)
+                .ignoresSafeArea()
+
             ContentView()
 
             if showingLaunchView {

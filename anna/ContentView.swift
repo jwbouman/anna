@@ -18,6 +18,7 @@ struct StockPrice: Identifiable {
     let rsi: Double?
     let stochasticK: Double?
     let stochasticD: Double?
+    let adx: Double?
 }
 
 @MainActor
@@ -119,6 +120,7 @@ struct YahooFinanceService {
 
         let rsiValues = calculateRSI(for: entries.map(\.close), period: 14)
         let stochasticValues = calculateStochasticOscillator(entries: entries, period: 14, signalPeriod: 3)
+        let adxValues = calculateADX(entries: entries, period: 14)
         let prices = entries.enumerated().map { index, entry in
             StockPrice(
                 date: entry.date,
@@ -126,7 +128,8 @@ struct YahooFinanceService {
                 volume: entry.volume,
                 rsi: rsiValues[index],
                 stochasticK: stochasticValues[index].k,
-                stochasticD: stochasticValues[index].d
+                stochasticD: stochasticValues[index].d,
+                adx: adxValues[index]
             )
         }
 
@@ -135,6 +138,101 @@ struct YahooFinanceService {
 
     private func rangeParameter(for count: Int) -> String {
         count <= 45 ? "3mo" : "6mo"
+    }
+
+    private func calculateADX(
+        entries: [(date: Date, close: Double, high: Double, low: Double, volume: Int)],
+        period: Int
+    ) -> [Double?] {
+        guard entries.count > period * 2 else {
+            return Array(repeating: nil, count: entries.count)
+        }
+
+        var trueRanges = Array(repeating: 0.0, count: entries.count)
+        var positiveDM = Array(repeating: 0.0, count: entries.count)
+        var negativeDM = Array(repeating: 0.0, count: entries.count)
+
+        for index in 1..<entries.count {
+            let current = entries[index]
+            let previous = entries[index - 1]
+            let highLow = current.high - current.low
+            let highPreviousClose = abs(current.high - previous.close)
+            let lowPreviousClose = abs(current.low - previous.close)
+            trueRanges[index] = max(highLow, highPreviousClose, lowPreviousClose)
+
+            let upwardMove = current.high - previous.high
+            let downwardMove = previous.low - current.low
+            positiveDM[index] = upwardMove > downwardMove && upwardMove > 0 ? upwardMove : 0
+            negativeDM[index] = downwardMove > upwardMove && downwardMove > 0 ? downwardMove : 0
+        }
+
+        var smoothedTR = trueRanges[1...period].reduce(0, +)
+        var smoothedPositiveDM = positiveDM[1...period].reduce(0, +)
+        var smoothedNegativeDM = negativeDM[1...period].reduce(0, +)
+        var dxValues = Array<Double?>(repeating: nil, count: entries.count)
+
+        dxValues[period] = dx(
+            smoothedTR: smoothedTR,
+            smoothedPositiveDM: smoothedPositiveDM,
+            smoothedNegativeDM: smoothedNegativeDM
+        )
+
+        guard entries.count > period + 1 else {
+            return Array(repeating: nil, count: entries.count)
+        }
+
+        for index in (period + 1)..<entries.count {
+            smoothedTR = smoothedTR - (smoothedTR / Double(period)) + trueRanges[index]
+            smoothedPositiveDM = smoothedPositiveDM - (smoothedPositiveDM / Double(period)) + positiveDM[index]
+            smoothedNegativeDM = smoothedNegativeDM - (smoothedNegativeDM / Double(period)) + negativeDM[index]
+            dxValues[index] = dx(
+                smoothedTR: smoothedTR,
+                smoothedPositiveDM: smoothedPositiveDM,
+                smoothedNegativeDM: smoothedNegativeDM
+            )
+        }
+
+        var adxValues = Array<Double?>(repeating: nil, count: entries.count)
+        let firstADXIndex = period * 2
+        let initialDXValues = dxValues[(period + 1)...firstADXIndex].compactMap { $0 }
+
+        guard initialDXValues.count == period else {
+            return adxValues
+        }
+
+        var previousADX = initialDXValues.reduce(0, +) / Double(period)
+        adxValues[firstADXIndex] = previousADX
+
+        guard entries.count > firstADXIndex + 1 else {
+            return adxValues
+        }
+
+        for index in (firstADXIndex + 1)..<entries.count {
+            guard let dx = dxValues[index] else {
+                continue
+            }
+
+            previousADX = ((previousADX * Double(period - 1)) + dx) / Double(period)
+            adxValues[index] = previousADX
+        }
+
+        return adxValues
+    }
+
+    private func dx(smoothedTR: Double, smoothedPositiveDM: Double, smoothedNegativeDM: Double) -> Double? {
+        guard smoothedTR > 0 else {
+            return nil
+        }
+
+        let positiveDI = 100 * (smoothedPositiveDM / smoothedTR)
+        let negativeDI = 100 * (smoothedNegativeDM / smoothedTR)
+        let sum = positiveDI + negativeDI
+
+        guard sum > 0 else {
+            return nil
+        }
+
+        return 100 * abs(positiveDI - negativeDI) / sum
     }
 
     private func calculateStochasticOscillator(
@@ -268,6 +366,7 @@ struct ContentView: View {
     @State private var viewModel = StockPriceViewModel()
     @State private var symbolInput = "ADYEN.AS"
     @State private var historicalDayCount = 30
+    @State private var showingInfo = false
     @AppStorage("favoriteStockSymbols") private var storedFavoriteSymbols = "ADYEN.AS,ASML.AS,BESI.AS,AAPL,TSLA"
 
     var body: some View {
@@ -295,14 +394,25 @@ struct ContentView: View {
                 }
                 .padding()
             }
-            .navigationTitle("Tech. analyse")
+            .navigationTitle("KoersKompas")
             .toolbar {
-                Button {
-                    loadSelectedSymbol()
-                } label: {
-                    Label("Ververs", systemImage: "arrow.clockwise")
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button {
+                        showingInfo = true
+                    } label: {
+                        Label("Info", systemImage: "info.circle")
+                    }
+
+                    Button {
+                        loadSelectedSymbol()
+                    } label: {
+                        Label("Ververs", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(viewModel.isLoading || trimmedSymbolInput.isEmpty)
                 }
-                .disabled(viewModel.isLoading || trimmedSymbolInput.isEmpty)
+            }
+            .sheet(isPresented: $showingInfo) {
+                InfoView()
             }
             .task {
                 if viewModel.prices.isEmpty {
@@ -328,6 +438,25 @@ struct ContentView: View {
             .split(separator: ",")
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).uppercased() }
             .filter { !$0.isEmpty }
+    }
+
+    private var tradingSignal: (text: String, color: Color) {
+        guard let latestPrice = viewModel.latestPrice,
+              let rsi = latestPrice.rsi,
+              let adx = latestPrice.adx,
+              adx > 25 else {
+            return ("n/a", .secondary)
+        }
+
+        if rsi > 70 {
+            return ("bullish", .green)
+        }
+
+        if rsi < 30 {
+            return ("bearish", .red)
+        }
+
+        return ("n/a", .secondary)
     }
 
     private var symbolSelector: some View {
@@ -496,6 +625,23 @@ struct ContentView: View {
 
                 stochasticChart
             }
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("ADX 14")
+                        .font(.headline)
+
+                    Spacer()
+
+                    if let latestADX = viewModel.latestPrice?.adx {
+                        Text(latestADX.formatted(.number.precision(.fractionLength(1))))
+                            .font(.subheadline.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                adxChart
+            }
         }
     }
 
@@ -509,6 +655,17 @@ struct ContentView: View {
                     Label("Volume: \(latestVolume.formatted(.number.notation(.compactName)))", systemImage: "chart.bar.fill")
                         .foregroundStyle(.teal)
                 }
+
+                Spacer()
+
+                HStack(spacing: 4) {
+                    Text("signaal")
+                        .foregroundStyle(.secondary)
+
+                    Text(tradingSignal.text)
+                        .font(.headline.weight(.bold))
+                        .foregroundStyle(tradingSignal.color)
+                }
             }
             .font(.caption)
 
@@ -517,15 +674,15 @@ struct ContentView: View {
                     if let volumeTop = scaledVolumeValue(price.volume), let volumeBaseline {
                         BarMark(
                             x: .value("Datum", price.date),
-                            yStart: .value("Volume basis", volumeBaseline),
-                            yEnd: .value("Volume", volumeTop)
+                            yStart: .value("Prijs", volumeBaseline),
+                            yEnd: .value("Prijs", volumeTop)
                         )
                         .foregroundStyle(.teal.opacity(0.34))
                     }
 
                     AreaMark(
                         x: .value("Datum", price.date),
-                        y: .value("Slotkoers", price.close)
+                        y: .value("Prijs", price.close)
                     )
                     .interpolationMethod(.catmullRom)
                     .foregroundStyle(.linearGradient(
@@ -536,7 +693,7 @@ struct ContentView: View {
 
                     LineMark(
                         x: .value("Datum", price.date),
-                        y: .value("Slotkoers", price.close)
+                        y: .value("Prijs", price.close)
                     )
                     .interpolationMethod(.catmullRom)
                     .foregroundStyle(.blue)
@@ -545,7 +702,7 @@ struct ContentView: View {
             .chartYAxisLabel("Prijs")
             .chartXScale(domain: visibleDateRange)
             .chartXAxis {
-                AxisMarks(values: .stride(by: .weekOfYear)) { _ in
+                AxisMarks(values: .stride(by: .weekOfYear, count: dateAxisWeekStride)) { _ in
                     AxisGridLine()
                     AxisTick()
                     AxisValueLabel(format: .dateTime.day().month(.abbreviated))
@@ -571,6 +728,10 @@ struct ContentView: View {
 
         let now = Date()
         return now...now.addingTimeInterval(86_400)
+    }
+
+    private var dateAxisWeekStride: Int {
+        historicalDayCount == 60 ? 2 : 1
     }
 
     private var priceRange: ClosedRange<Double>? {
@@ -607,11 +768,11 @@ struct ContentView: View {
 
     private var rsiChart: some View {
         Chart {
-            RuleMark(y: .value("Overbought", 70))
+            RuleMark(y: .value("RSI", 70))
                 .foregroundStyle(.red.opacity(0.45))
                 .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
 
-            RuleMark(y: .value("Oversold", 30))
+            RuleMark(y: .value("RSI", 30))
                 .foregroundStyle(.green.opacity(0.45))
                 .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
 
@@ -632,7 +793,7 @@ struct ContentView: View {
             AxisMarks(position: .leading, values: [30, 50, 70])
         }
         .chartXAxis {
-            AxisMarks(values: .stride(by: .weekOfYear)) { _ in
+            AxisMarks(values: .stride(by: .weekOfYear, count: dateAxisWeekStride)) { _ in
                 AxisTick()
                 AxisValueLabel(format: .dateTime.day().month(.abbreviated))
             }
@@ -642,11 +803,11 @@ struct ContentView: View {
 
     private var stochasticChart: some View {
         Chart {
-            RuleMark(y: .value("Overbought", 80))
+            RuleMark(y: .value("Stochastic", 80))
                 .foregroundStyle(.red.opacity(0.45))
                 .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
 
-            RuleMark(y: .value("Oversold", 20))
+            RuleMark(y: .value("Stochastic", 20))
                 .foregroundStyle(.green.opacity(0.45))
                 .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
 
@@ -654,7 +815,7 @@ struct ContentView: View {
                 if let stochasticK = price.stochasticK {
                     LineMark(
                         x: .value("Datum", price.date),
-                        y: .value("%K", stochasticK),
+                        y: .value("Stochastic", stochasticK),
                         series: .value("Lijn", "%K")
                     )
                     .interpolationMethod(.catmullRom)
@@ -664,7 +825,7 @@ struct ContentView: View {
                 if let stochasticD = price.stochasticD {
                     LineMark(
                         x: .value("Datum", price.date),
-                        y: .value("%D", stochasticD),
+                        y: .value("Stochastic", stochasticD),
                         series: .value("Lijn", "%D")
                     )
                     .interpolationMethod(.catmullRom)
@@ -679,7 +840,38 @@ struct ContentView: View {
             AxisMarks(position: .leading, values: [20, 50, 80])
         }
         .chartXAxis {
-            AxisMarks(values: .stride(by: .weekOfYear)) { _ in
+            AxisMarks(values: .stride(by: .weekOfYear, count: dateAxisWeekStride)) { _ in
+                AxisTick()
+                AxisValueLabel(format: .dateTime.day().month(.abbreviated))
+            }
+        }
+        .frame(height: 150)
+    }
+
+    private var adxChart: some View {
+        Chart {
+            RuleMark(y: .value("ADX", 25))
+                .foregroundStyle(.secondary.opacity(0.45))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+
+            ForEach(viewModel.prices) { price in
+                if let adx = price.adx {
+                    LineMark(
+                        x: .value("Datum", price.date),
+                        y: .value("ADX", adx)
+                    )
+                    .interpolationMethod(.catmullRom)
+                    .foregroundStyle(.indigo)
+                }
+            }
+        }
+        .chartYScale(domain: 0...100)
+        .chartXScale(domain: visibleDateRange)
+        .chartYAxis {
+            AxisMarks(position: .leading, values: [0, 25, 50, 75])
+        }
+        .chartXAxis {
+            AxisMarks(values: .stride(by: .weekOfYear, count: dateAxisWeekStride)) { _ in
                 AxisTick()
                 AxisValueLabel(format: .dateTime.day().month(.abbreviated))
             }
