@@ -7,13 +7,15 @@ struct InfoView: View {
         NavigationStack {
             List {
                 Section("KoersKompas") {
-                    Text("KoersKompas toont historische Marketstack koersdata, volume en technische indicatoren voor gekozen tickers.")
+                    Text("KoersKompas toont historische koersdata, volume en technische indicatoren voor gekozen tickers.")
+                    Text("Koersdata wordt opgehaald via de KoersKompas proxy en geleverd door Marketstack.")
+                    Text("De getoonde data is historische EOD-data en is niet realtime.")
                 }
 
                 Section("Signaal") {
                     Text("bullish: ADX is hoger dan 25 en RSI is hoger dan 70.")
                     Text("bearish: ADX is hoger dan 25 en RSI is lager dan 30.")
-                    Text("N/A: er is geen bullish of bearish signaal volgens deze regels.")
+                    Text("neutral: er is geen bullish of bearish signaal volgens deze regels.")
                 }
 
                 Section("Indicatoren") {
@@ -23,7 +25,8 @@ struct InfoView: View {
                 }
 
                 Section("Disclaimer") {
-                    Text("Deze app is uitsluitend bedoeld voor informatieve technische analyse en vormt geen beleggingsadvies.")
+                    Text("Deze app is uitsluitend bedoeld voor informatieve technische analyse en vormt geen beleggingsadvies, koopadvies of verkoopadvies.")
+                    Text("Koersdata en indicatoren kunnen vertraagd, onvolledig of onjuist zijn. Controleer belangrijke beslissingen altijd bij een onafhankelijke bron.")
                 }
             }
             .navigationTitle("Info")

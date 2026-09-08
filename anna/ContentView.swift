@@ -15,6 +15,7 @@ struct StockPrice: Identifiable {
     let date: Date
     let close: Double
     let volume: Int
+    let currencyCode: String
     let rsi: Double?
     let stochasticK: Double?
     let stochasticD: Double?
@@ -63,6 +64,8 @@ final class StockPriceViewModel {
             prices = try await service.fetchLastClosingPrices(symbol: normalizedSymbol, count: normalizedDayCount)
             symbol = normalizedSymbol
             historicalDayCount = normalizedDayCount
+        } catch let error as URLError {
+            errorMessage = "De koersproxy is niet bereikbaar. Controleer je internetverbinding en probeer het opnieuw. \(error.localizedDescription)"
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -76,13 +79,21 @@ struct MarketstackService {
         let priceResponse = try await fetchPrices(symbol: symbol, count: count)
         let entries = priceResponse.data
             .sorted { $0.date < $1.date }
-            .map { price -> (date: Date, close: Double, high: Double, low: Double, volume: Int) in
-                (
+            .compactMap { price -> (date: Date, close: Double, high: Double, low: Double, volume: Int, currencyCode: String)? in
+                guard let close = price.adjustedClose ?? price.close,
+                      let high = price.adjustedHigh ?? price.high,
+                      let low = price.adjustedLow ?? price.low,
+                      let volume = price.adjustedVolume ?? price.volume else {
+                    return nil
+                }
+
+                return (
                     date: price.date,
-                    close: price.adjustedClose ?? price.close,
-                    high: price.adjustedHigh ?? price.high,
-                    low: price.adjustedLow ?? price.low,
-                    volume: Int(price.adjustedVolume ?? price.volume)
+                    close: close,
+                    high: high,
+                    low: low,
+                    volume: Int(volume),
+                    currencyCode: price.priceCurrency ?? "EUR"
                 )
             }
 
@@ -90,14 +101,24 @@ struct MarketstackService {
             throw StockPriceError.noData
         }
 
-        let rsiValues = calculateRSI(for: entries.map(\.close), period: 14)
-        let stochasticValues = calculateStochasticOscillator(entries: entries, period: 14, signalPeriod: 3)
-        let adxValues = calculateADX(entries: entries, period: 14)
+        let indicatorEntries = entries.map { entry in
+            (
+                date: entry.date,
+                close: entry.close,
+                high: entry.high,
+                low: entry.low,
+                volume: entry.volume
+            )
+        }
+        let rsiValues = calculateRSI(for: indicatorEntries.map(\.close), period: 14)
+        let stochasticValues = calculateStochasticOscillator(entries: indicatorEntries, period: 14, signalPeriod: 3)
+        let adxValues = calculateADX(entries: indicatorEntries, period: 14)
         let prices = entries.enumerated().map { index, entry in
             StockPrice(
                 date: entry.date,
                 close: entry.close,
                 volume: entry.volume,
+                currencyCode: entry.currencyCode,
                 rsi: rsiValues[index],
                 stochasticK: stochasticValues[index].k,
                 stochasticD: stochasticValues[index].d,
@@ -356,7 +377,7 @@ enum StockPriceError: LocalizedError {
         case let .badResponse(statusCode, detail):
             let statusText = statusCode.map { "HTTP \($0)" } ?? "geen HTTP-status"
             let detailText = detail.map { " Marketstack meldt: \($0)" } ?? ""
-            return "De koersproxy gaf geen geldige response terug (\(statusText)).\(detailText) Controleer het ticker-symbool."
+            return "De koersproxy gaf geen geldige response terug (\(statusText)).\(detailText) Controleer het ticker-symbool of probeer het later opnieuw."
         case let .decodingFailed(message):
             return "De Marketstack data kon niet worden gelezen. \(message)"
         case .noData:
@@ -371,14 +392,15 @@ struct MarketstackEODResponse: Decodable {
 
 struct MarketstackEODPrice: Decodable {
     let date: Date
-    let high: Double
-    let low: Double
-    let close: Double
-    let volume: Double
+    let high: Double?
+    let low: Double?
+    let close: Double?
+    let volume: Double?
     let adjustedHigh: Double?
     let adjustedLow: Double?
     let adjustedClose: Double?
     let adjustedVolume: Double?
+    let priceCurrency: String?
 
     enum CodingKeys: String, CodingKey {
         case date
@@ -390,6 +412,7 @@ struct MarketstackEODPrice: Decodable {
         case adjustedLow = "adj_low"
         case adjustedClose = "adj_close"
         case adjustedVolume = "adj_volume"
+        case priceCurrency = "price_currency"
     }
 
     nonisolated static func decodeDate(from decoder: Decoder) throws -> Date {
@@ -517,6 +540,19 @@ struct ContentView: View {
         trimmedSymbolInput.uppercased()
     }
 
+    private var currencyCode: String {
+        viewModel.latestPrice?.currencyCode ?? "EUR"
+    }
+
+    private var lastUpdatedText: String {
+        guard let latestDate = viewModel.latestPrice?.date else {
+            return "Historische EOD-data via koersproxy; niet realtime."
+        }
+
+        let formattedDate = latestDate.formatted(.dateTime.day().month(.wide).year())
+        return "Laatste koersdatum: \(formattedDate). Historische EOD-data; niet realtime."
+    }
+
     private var favoriteSymbols: [String] {
         storedFavoriteSymbols
             .split(separator: ",")
@@ -529,7 +565,7 @@ struct ContentView: View {
               let rsi = latestPrice.rsi,
               let adx = latestPrice.adx,
               adx > 25 else {
-            return ("n/a", .secondary)
+            return ("neutral", .secondary)
         }
 
         if rsi > 70 {
@@ -540,7 +576,7 @@ struct ContentView: View {
             return ("bearish", .red)
         }
 
-        return ("n/a", .secondary)
+        return ("neutral", .secondary)
     }
 
     private var symbolSelector: some View {
@@ -607,31 +643,37 @@ struct ContentView: View {
     }
 
     private var header: some View {
-        HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(viewModel.symbol)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(viewModel.latestPrice?.close.formatted(.currency(code: "EUR")) ?? "--")
-                    .font(.system(.largeTitle, design: .rounded, weight: .semibold))
-            }
-
-            Spacer()
-
-            if let priceChange = viewModel.priceChange {
-                VStack(alignment: .trailing, spacing: 3) {
-                    Text("koersverschil")
-                        .font(.caption2)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(viewModel.symbol)
+                        .font(.caption)
                         .foregroundStyle(.secondary)
-
-                    Text(priceChange, format: .currency(code: "EUR"))
-                        .font(.headline)
-                        .foregroundStyle(priceChange >= 0 ? .green : .red)
+                    Text(viewModel.latestPrice?.close.formatted(.currency(code: currencyCode)) ?? "--")
+                        .font(.system(.largeTitle, design: .rounded, weight: .semibold))
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background((priceChange >= 0 ? Color.green : Color.red).opacity(0.12), in: Capsule())
+
+                Spacer()
+
+                if let priceChange = viewModel.priceChange {
+                    VStack(alignment: .trailing, spacing: 3) {
+                        Text("koersverschil")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+
+                        Text(priceChange, format: .currency(code: currencyCode))
+                            .font(.headline)
+                            .foregroundStyle(priceChange >= 0 ? .green : .red)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background((priceChange >= 0 ? Color.green : Color.red).opacity(0.12), in: Capsule())
+                }
             }
+
+            Label(lastUpdatedText, systemImage: "clock")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
