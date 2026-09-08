@@ -44,7 +44,7 @@ final class StockPriceViewModel {
         return last - first
     }
 
-    func loadPrices(symbol requestedSymbol: String? = nil, dayCount requestedDayCount: Int? = nil, apiKey: String) async {
+    func loadPrices(symbol requestedSymbol: String? = nil, dayCount requestedDayCount: Int? = nil) async {
         let normalizedSymbol = (requestedSymbol ?? symbol)
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .uppercased()
@@ -56,18 +56,11 @@ final class StockPriceViewModel {
             return
         }
 
-        let sanitizedAPIKey = MarketstackService.sanitizedAPIKey(from: apiKey)
-        guard !sanitizedAPIKey.isEmpty else {
-            prices = []
-            errorMessage = "Vul eerst je Marketstack API key in."
-            return
-        }
-
         isLoading = true
         errorMessage = nil
 
         do {
-            prices = try await service.fetchLastClosingPrices(symbol: normalizedSymbol, count: normalizedDayCount, apiKey: sanitizedAPIKey)
+            prices = try await service.fetchLastClosingPrices(symbol: normalizedSymbol, count: normalizedDayCount)
             symbol = normalizedSymbol
             historicalDayCount = normalizedDayCount
         } catch {
@@ -79,8 +72,8 @@ final class StockPriceViewModel {
 }
 
 struct MarketstackService {
-    func fetchLastClosingPrices(symbol: String, count: Int, apiKey: String) async throws -> [StockPrice] {
-        let priceResponse = try await fetchPrices(symbol: symbol, count: count, apiKey: apiKey)
+    func fetchLastClosingPrices(symbol: String, count: Int) async throws -> [StockPrice] {
+        let priceResponse = try await fetchPrices(symbol: symbol, count: count)
         let entries = priceResponse.data
             .sorted { $0.date < $1.date }
             .map { price -> (date: Date, close: Double, high: Double, low: Double, volume: Int) in
@@ -115,16 +108,11 @@ struct MarketstackService {
         return Array(prices.suffix(count))
     }
 
-    private func fetchPrices(symbol: String, count: Int, apiKey: String) async throws -> MarketstackEODResponse {
-        let dates = dateRange(for: count)
-        var components = URLComponents(string: "https://api.marketstack.com/v2/eod")
+    private func fetchPrices(symbol: String, count: Int) async throws -> MarketstackEODResponse {
+        var components = URLComponents(string: "https://itest4u.nl/prices.php")
         components?.queryItems = [
-            URLQueryItem(name: "access_key", value: apiKey),
-            URLQueryItem(name: "symbols", value: marketstackSymbol(for: symbol)),
-            URLQueryItem(name: "date_from", value: dates.start),
-            URLQueryItem(name: "date_to", value: dates.end),
-            URLQueryItem(name: "sort", value: "ASC"),
-            URLQueryItem(name: "limit", value: String(max(count * 3, 100)))
+            URLQueryItem(name: "symbol", value: marketstackSymbol(for: symbol)),
+            URLQueryItem(name: "days", value: String(count))
         ]
 
         guard let url = components?.url else {
@@ -160,26 +148,6 @@ struct MarketstackService {
 
     private func marketstackSymbol(for symbol: String) -> String {
         symbol.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-    }
-
-    static func sanitizedAPIKey(from apiKey: String) -> String {
-        let trimmedAPIKey = apiKey
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
-
-        if let url = URL(string: trimmedAPIKey),
-           let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-           let accessKeyQueryValue = components.queryItems?.first(where: { $0.name == "access_key" })?.value {
-            return sanitizedAPIKey(from: accessKeyQueryValue)
-        }
-
-        for prefix in ["MARKETSTACK_API_KEY=", "access_key="] {
-            if trimmedAPIKey.hasPrefix(prefix) {
-                return sanitizedAPIKey(from: String(trimmedAPIKey.dropFirst(prefix.count)))
-            }
-        }
-
-        return trimmedAPIKey
     }
 
     private func dateRange(for count: Int) -> (start: String, end: String) {
@@ -388,7 +356,7 @@ enum StockPriceError: LocalizedError {
         case let .badResponse(statusCode, detail):
             let statusText = statusCode.map { "HTTP \($0)" } ?? "geen HTTP-status"
             let detailText = detail.map { " Marketstack meldt: \($0)" } ?? ""
-            return "Marketstack gaf geen geldige response terug (\(statusText)).\(detailText) Controleer je API key en ticker-symbool."
+            return "De koersproxy gaf geen geldige response terug (\(statusText)).\(detailText) Controleer het ticker-symbool."
         case let .decodingFailed(message):
             return "De Marketstack data kon niet worden gelezen. \(message)"
         case .noData:
@@ -483,14 +451,12 @@ struct ContentView: View {
     @State private var symbolInput = "ADYEN.AS"
     @State private var historicalDayCount = 30
     @State private var showingInfo = false
-    @AppStorage("marketstackAPIKey") private var marketstackAPIKey = ""
     @AppStorage("favoriteStockSymbols") private var storedFavoriteSymbols = "ADYEN.AS,ASML.AS,BESI.AS,AAPL,TSLA"
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    apiKeyInput
                     symbolSelector
                     header
 
@@ -526,7 +492,7 @@ struct ContentView: View {
                     } label: {
                         Label("Ververs", systemImage: "arrow.clockwise")
                     }
-                    .disabled(viewModel.isLoading || trimmedSymbolInput.isEmpty || trimmedMarketstackAPIKey.isEmpty)
+                    .disabled(viewModel.isLoading || trimmedSymbolInput.isEmpty)
                 }
             }
             .sheet(isPresented: $showingInfo) {
@@ -534,7 +500,7 @@ struct ContentView: View {
             }
             .task {
                 if viewModel.prices.isEmpty {
-                    await viewModel.loadPrices(symbol: symbolInput, dayCount: historicalDayCount, apiKey: marketstackAPIKey)
+                    await viewModel.loadPrices(symbol: symbolInput, dayCount: historicalDayCount)
                 }
             }
             .onChange(of: historicalDayCount) { _, _ in
@@ -551,44 +517,11 @@ struct ContentView: View {
         trimmedSymbolInput.uppercased()
     }
 
-    private var trimmedMarketstackAPIKey: String {
-        MarketstackService.sanitizedAPIKey(from: marketstackAPIKey)
-    }
-
     private var favoriteSymbols: [String] {
         storedFavoriteSymbols
             .split(separator: ",")
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).uppercased() }
             .filter { !$0.isEmpty }
-    }
-
-    private var apiKeyInput: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Marketstack API key")
-                .font(.headline)
-
-            HStack(spacing: 10) {
-                SecureField("API key", text: $marketstackAPIKey)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .textFieldStyle(.roundedBorder)
-                    .submitLabel(.done)
-
-                Button {
-                    marketstackAPIKey = ""
-                } label: {
-                    Label("Wis", systemImage: "xmark.circle")
-                }
-                .buttonStyle(.bordered)
-                .disabled(marketstackAPIKey.isEmpty || viewModel.isLoading)
-            }
-
-            if trimmedMarketstackAPIKey.isEmpty {
-                Label("Vul je Marketstack API key in om koersen te laden.", systemImage: "key")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
     }
 
     private var tradingSignal: (text: String, color: Color) {
@@ -706,7 +639,7 @@ struct ContentView: View {
         symbolInput = normalizedSymbolInput
 
         Task {
-            await viewModel.loadPrices(symbol: symbolInput, dayCount: historicalDayCount, apiKey: marketstackAPIKey)
+            await viewModel.loadPrices(symbol: symbolInput, dayCount: historicalDayCount)
         }
     }
 
