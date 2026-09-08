@@ -7,7 +7,7 @@ struct InfoView: View {
         NavigationStack {
             List {
                 Section("KoersKompas") {
-                    Text("KoersKompas toont historische koersdata, volume en technische indicatoren voor gekozen Yahoo Finance tickers.")
+                    Text("KoersKompas toont historische Marketstack koersdata, volume en technische indicatoren voor gekozen tickers.")
                 }
 
                 Section("Signaal") {

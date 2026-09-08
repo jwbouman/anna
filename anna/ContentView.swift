@@ -30,7 +30,7 @@ final class StockPriceViewModel {
     private(set) var isLoading = false
     var errorMessage: String?
 
-    private let service = YahooFinanceService()
+    private let service = MarketstackService()
 
     var latestPrice: StockPrice? {
         prices.last
@@ -44,7 +44,7 @@ final class StockPriceViewModel {
         return last - first
     }
 
-    func loadPrices(symbol requestedSymbol: String? = nil, dayCount requestedDayCount: Int? = nil) async {
+    func loadPrices(symbol requestedSymbol: String? = nil, dayCount requestedDayCount: Int? = nil, apiKey: String) async {
         let normalizedSymbol = (requestedSymbol ?? symbol)
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .uppercased()
@@ -56,11 +56,18 @@ final class StockPriceViewModel {
             return
         }
 
+        let sanitizedAPIKey = MarketstackService.sanitizedAPIKey(from: apiKey)
+        guard !sanitizedAPIKey.isEmpty else {
+            prices = []
+            errorMessage = "Vul eerst je Marketstack API key in."
+            return
+        }
+
         isLoading = true
         errorMessage = nil
 
         do {
-            prices = try await service.fetchLastClosingPrices(symbol: normalizedSymbol, count: normalizedDayCount)
+            prices = try await service.fetchLastClosingPrices(symbol: normalizedSymbol, count: normalizedDayCount, apiKey: sanitizedAPIKey)
             symbol = normalizedSymbol
             historicalDayCount = normalizedDayCount
         } catch {
@@ -71,51 +78,23 @@ final class StockPriceViewModel {
     }
 }
 
-struct YahooFinanceService {
-    func fetchLastClosingPrices(symbol: String, count: Int) async throws -> [StockPrice] {
-        guard let encodedSymbol = symbol.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else {
-            throw StockPriceError.invalidURL
-        }
-
-        var components = URLComponents(string: "https://query1.finance.yahoo.com/v8/finance/chart/\(encodedSymbol)")
-        components?.queryItems = [
-            URLQueryItem(name: "range", value: rangeParameter(for: count)),
-            URLQueryItem(name: "interval", value: "1d")
-        ]
-
-        guard let url = components?.url else {
-            throw StockPriceError.invalidURL
-        }
-
-        let (data, response) = try await URLSession.shared.data(from: url)
-
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200...299).contains(httpResponse.statusCode) else {
-            throw StockPriceError.badResponse
-        }
-
-        let chartResponse = try JSONDecoder().decode(YahooChartResponse.self, from: data)
-
-        guard let result = chartResponse.chart.result.first,
-              let timestamps = result.timestamp,
-              let quote = result.indicators.quote.first else {
-            throw StockPriceError.noData
-        }
-
-        let entries = zip(timestamps, zip(zip(quote.close, quote.high), zip(quote.low, quote.volume))).compactMap { timestamp, values -> (date: Date, close: Double, high: Double, low: Double, volume: Int)? in
-            let ((close, high), (low, volume)) = values
-
-            guard let close, let high, let low, let volume else {
-                return nil
+struct MarketstackService {
+    func fetchLastClosingPrices(symbol: String, count: Int, apiKey: String) async throws -> [StockPrice] {
+        let priceResponse = try await fetchPrices(symbol: symbol, count: count, apiKey: apiKey)
+        let entries = priceResponse.data
+            .sorted { $0.date < $1.date }
+            .map { price -> (date: Date, close: Double, high: Double, low: Double, volume: Int) in
+                (
+                    date: price.date,
+                    close: price.adjustedClose ?? price.close,
+                    high: price.adjustedHigh ?? price.high,
+                    low: price.adjustedLow ?? price.low,
+                    volume: Int(price.adjustedVolume ?? price.volume)
+                )
             }
 
-            return (
-                date: Date(timeIntervalSince1970: TimeInterval(timestamp)),
-                close: close,
-                high: high,
-                low: low,
-                volume: volume
-            )
+        guard !entries.isEmpty else {
+            throw StockPriceError.noData
         }
 
         let rsiValues = calculateRSI(for: entries.map(\.close), period: 14)
@@ -136,8 +115,83 @@ struct YahooFinanceService {
         return Array(prices.suffix(count))
     }
 
-    private func rangeParameter(for count: Int) -> String {
-        count <= 45 ? "3mo" : "6mo"
+    private func fetchPrices(symbol: String, count: Int, apiKey: String) async throws -> MarketstackEODResponse {
+        let dates = dateRange(for: count)
+        var components = URLComponents(string: "https://api.marketstack.com/v2/eod")
+        components?.queryItems = [
+            URLQueryItem(name: "access_key", value: apiKey),
+            URLQueryItem(name: "symbols", value: marketstackSymbol(for: symbol)),
+            URLQueryItem(name: "date_from", value: dates.start),
+            URLQueryItem(name: "date_to", value: dates.end),
+            URLQueryItem(name: "sort", value: "ASC"),
+            URLQueryItem(name: "limit", value: String(max(count * 3, 100)))
+        ]
+
+        guard let url = components?.url else {
+            throw StockPriceError.invalidURL
+        }
+
+        let (data, response) = try await URLSession.shared.data(from: url)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw StockPriceError.badResponse(statusCode: nil, detail: nil)
+        }
+
+        guard (200...299).contains(httpResponse.statusCode) else {
+            throw StockPriceError.badResponse(
+                statusCode: httpResponse.statusCode,
+                detail: MarketstackErrorResponse.detail(from: data)
+            )
+        }
+
+        if let errorDetail = MarketstackErrorResponse.detail(from: data) {
+            throw StockPriceError.badResponse(statusCode: httpResponse.statusCode, detail: errorDetail)
+        }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .custom(MarketstackEODPrice.decodeDate)
+
+        do {
+            return try decoder.decode(MarketstackEODResponse.self, from: data)
+        } catch {
+            throw StockPriceError.decodingFailed(error.localizedDescription)
+        }
+    }
+
+    private func marketstackSymbol(for symbol: String) -> String {
+        symbol.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+    }
+
+    static func sanitizedAPIKey(from apiKey: String) -> String {
+        let trimmedAPIKey = apiKey
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+
+        if let url = URL(string: trimmedAPIKey),
+           let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+           let accessKeyQueryValue = components.queryItems?.first(where: { $0.name == "access_key" })?.value {
+            return sanitizedAPIKey(from: accessKeyQueryValue)
+        }
+
+        for prefix in ["MARKETSTACK_API_KEY=", "access_key="] {
+            if trimmedAPIKey.hasPrefix(prefix) {
+                return sanitizedAPIKey(from: String(trimmedAPIKey.dropFirst(prefix.count)))
+            }
+        }
+
+        return trimmedAPIKey
+    }
+
+    private func dateRange(for count: Int) -> (start: String, end: String) {
+        let endDate = Date()
+        let lookbackDays = max(count * 3, 90)
+        let startDate = Calendar.current.date(byAdding: .day, value: -lookbackDays, to: endDate) ?? endDate
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+
+        return (formatter.string(from: startDate), formatter.string(from: endDate))
     }
 
     private func calculateADX(
@@ -323,42 +377,104 @@ struct YahooFinanceService {
 
 enum StockPriceError: LocalizedError {
     case invalidURL
-    case badResponse
+    case badResponse(statusCode: Int?, detail: String?)
+    case decodingFailed(String)
     case noData
 
     var errorDescription: String? {
         switch self {
         case .invalidURL:
-            return "De Yahoo Finance URL kon niet worden gemaakt."
-        case .badResponse:
-            return "Yahoo Finance gaf geen geldige response terug."
+            return "De Marketstack URL kon niet worden gemaakt."
+        case let .badResponse(statusCode, detail):
+            let statusText = statusCode.map { "HTTP \($0)" } ?? "geen HTTP-status"
+            let detailText = detail.map { " Marketstack meldt: \($0)" } ?? ""
+            return "Marketstack gaf geen geldige response terug (\(statusText)).\(detailText) Controleer je API key en ticker-symbool."
+        case let .decodingFailed(message):
+            return "De Marketstack data kon niet worden gelezen. \(message)"
         case .noData:
-            return "Er zijn geen slotkoersen gevonden voor dit symbool."
+            return "Er zijn geen Marketstack slotkoersen gevonden voor dit symbool."
         }
     }
 }
 
-struct YahooChartResponse: Decodable {
-    let chart: ChartData
+struct MarketstackEODResponse: Decodable {
+    let data: [MarketstackEODPrice]
+}
 
-    struct ChartData: Decodable {
-        let result: [ResultData]
+struct MarketstackEODPrice: Decodable {
+    let date: Date
+    let high: Double
+    let low: Double
+    let close: Double
+    let volume: Double
+    let adjustedHigh: Double?
+    let adjustedLow: Double?
+    let adjustedClose: Double?
+    let adjustedVolume: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case date
+        case high
+        case low
+        case close
+        case volume
+        case adjustedHigh = "adj_high"
+        case adjustedLow = "adj_low"
+        case adjustedClose = "adj_close"
+        case adjustedVolume = "adj_volume"
     }
 
-    struct ResultData: Decodable {
-        let timestamp: [Int]?
-        let indicators: Indicators
+    nonisolated static func decodeDate(from decoder: Decoder) throws -> Date {
+        let container = try decoder.singleValueContainer()
+        let dateString = try container.decode(String.self)
+
+        let isoFormatter = ISO8601DateFormatter()
+        isoFormatter.formatOptions = [.withInternetDateTime]
+        if let date = isoFormatter.date(from: dateString) {
+            return date
+        }
+
+        let timezoneFormatter = DateFormatter()
+        timezoneFormatter.calendar = Calendar(identifier: .gregorian)
+        timezoneFormatter.locale = Locale(identifier: "en_US_POSIX")
+        timezoneFormatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ssZ"
+        if let date = timezoneFormatter.date(from: dateString) {
+            return date
+        }
+
+        let dateOnlyFormatter = DateFormatter()
+        dateOnlyFormatter.calendar = Calendar(identifier: .gregorian)
+        dateOnlyFormatter.locale = Locale(identifier: "en_US_POSIX")
+        dateOnlyFormatter.dateFormat = "yyyy-MM-dd"
+        if let date = dateOnlyFormatter.date(from: dateString) {
+            return date
+        }
+
+        throw DecodingError.dataCorruptedError(
+            in: container,
+            debugDescription: "Ongeldig Marketstack datumformaat: \(dateString)"
+        )
+    }
+}
+
+struct MarketstackErrorResponse: Decodable {
+    let error: APIError?
+
+    struct APIError: Decodable {
+        let code: String?
+        let message: String?
     }
 
-    struct Indicators: Decodable {
-        let quote: [Quote]
-    }
+    static func detail(from data: Data) -> String? {
+        guard let response = try? JSONDecoder().decode(MarketstackErrorResponse.self, from: data),
+              let error = response.error else {
+            return nil
+        }
 
-    struct Quote: Decodable {
-        let close: [Double?]
-        let high: [Double?]
-        let low: [Double?]
-        let volume: [Int?]
+        let detail = [error.code, error.message]
+            .compactMap { $0 }
+            .joined(separator: ": ")
+        return detail.isEmpty ? nil : detail
     }
 }
 
@@ -367,12 +483,14 @@ struct ContentView: View {
     @State private var symbolInput = "ADYEN.AS"
     @State private var historicalDayCount = 30
     @State private var showingInfo = false
+    @AppStorage("marketstackAPIKey") private var marketstackAPIKey = ""
     @AppStorage("favoriteStockSymbols") private var storedFavoriteSymbols = "ADYEN.AS,ASML.AS,BESI.AS,AAPL,TSLA"
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
+                    apiKeyInput
                     symbolSelector
                     header
 
@@ -408,7 +526,7 @@ struct ContentView: View {
                     } label: {
                         Label("Ververs", systemImage: "arrow.clockwise")
                     }
-                    .disabled(viewModel.isLoading || trimmedSymbolInput.isEmpty)
+                    .disabled(viewModel.isLoading || trimmedSymbolInput.isEmpty || trimmedMarketstackAPIKey.isEmpty)
                 }
             }
             .sheet(isPresented: $showingInfo) {
@@ -416,7 +534,7 @@ struct ContentView: View {
             }
             .task {
                 if viewModel.prices.isEmpty {
-                    await viewModel.loadPrices(symbol: symbolInput, dayCount: historicalDayCount)
+                    await viewModel.loadPrices(symbol: symbolInput, dayCount: historicalDayCount, apiKey: marketstackAPIKey)
                 }
             }
             .onChange(of: historicalDayCount) { _, _ in
@@ -433,11 +551,44 @@ struct ContentView: View {
         trimmedSymbolInput.uppercased()
     }
 
+    private var trimmedMarketstackAPIKey: String {
+        MarketstackService.sanitizedAPIKey(from: marketstackAPIKey)
+    }
+
     private var favoriteSymbols: [String] {
         storedFavoriteSymbols
             .split(separator: ",")
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).uppercased() }
             .filter { !$0.isEmpty }
+    }
+
+    private var apiKeyInput: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Marketstack API key")
+                .font(.headline)
+
+            HStack(spacing: 10) {
+                SecureField("API key", text: $marketstackAPIKey)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .textFieldStyle(.roundedBorder)
+                    .submitLabel(.done)
+
+                Button {
+                    marketstackAPIKey = ""
+                } label: {
+                    Label("Wis", systemImage: "xmark.circle")
+                }
+                .buttonStyle(.bordered)
+                .disabled(marketstackAPIKey.isEmpty || viewModel.isLoading)
+            }
+
+            if trimmedMarketstackAPIKey.isEmpty {
+                Label("Vul je Marketstack API key in om koersen te laden.", systemImage: "key")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 
     private var tradingSignal: (text: String, color: Color) {
@@ -555,7 +706,7 @@ struct ContentView: View {
         symbolInput = normalizedSymbolInput
 
         Task {
-            await viewModel.loadPrices(symbol: symbolInput, dayCount: historicalDayCount)
+            await viewModel.loadPrices(symbol: symbolInput, dayCount: historicalDayCount, apiKey: marketstackAPIKey)
         }
     }
 
