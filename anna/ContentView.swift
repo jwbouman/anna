@@ -130,7 +130,7 @@ struct MarketstackService {
     }
 
     private func fetchPrices(symbol: String, count: Int) async throws -> MarketstackEODResponse {
-        var components = URLComponents(string: "https://itest4u.nl/prices.php")
+        var components = URLComponents(string: "https://compuguy.eu/prices.php")
         components?.queryItems = [
             URLQueryItem(name: "symbol", value: marketstackSymbol(for: symbol)),
             URLQueryItem(name: "days", value: String(count))
